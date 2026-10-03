@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Supjav popup blocker
 // @namespace    local.supjav-popup-blocker
-// @version      1.2.0
+// @version      1.2.1
 // @description  Block Supjav popups and auto-load the real player iframe.
 // @match        *://supjav.com/*
 // @match        *://*.supjav.com/*
@@ -43,8 +43,6 @@
 // @match        *://*/*
 // @include      about:blank
 // @run-at       document-start
-// @grant        GM_getValue
-// @grant        GM_setValue
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -119,8 +117,6 @@
     "cloudflare.com"
   ];
 
-  const popupGuardKey = "supjavPopupGuardUntil";
-  const popupGuardMs = 8000;
   const exportStateMessage = "supjav-export-state";
   const exportStateRequest = "supjav-export-request";
   const exportStates = new Map();
@@ -174,43 +170,25 @@
   };
 
   const relevantHost = (host) =>
-    [...allowedDomains, ...blockedDomains, ...playerDomains].some((domain) => hostMatches(host, domain));
+    [...allowedDomains, ...playerDomains].some((domain) => hostMatches(host, domain));
 
-  const supjavContext = () => {
-    const text = [location.href, document.referrer].filter(Boolean).join(" ");
-    try {
-      return /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(text) ||
-        /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(decodeURIComponent(text));
-    } catch {
-      return /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(text);
-    }
-  };
-
-  // VOE player mirrors rotate (e.g. pamelachangemission.com). Detect by known
-  // hosts, voe.sx referrer, title markers, or /e/<id> player path.
+  // VOE player mirrors rotate (e.g. pamelachangemission.com). Unknown hosts
+  // need an /e/<id> player path plus a supported referrer or a VOE title marker.
   const voePlayerContext = () => {
     const host = location.hostname.replace(/^www\./, "");
     if (voeStaticDomains.some((domain) => hostMatches(host, domain))) return true;
-
-    const referrerHost = hostOf(document.referrer);
-    if (voeStaticDomains.some((domain) => hostMatches(referrerHost, domain))) return true;
+    // A title mentioning VOE on an ordinary page is not enough to claim it.
+    if (!/^\/e\/[a-z0-9]+\/?$/i.test(location.pathname)) return false;
 
     const title = document.title || "";
-    if (/\bVOE\b/i.test(title) && /Content Delivery Network|Video Cloud|观看/i.test(title)) return true;
-
-    // Embed path used by VOE mirrors: /e/<alphanumeric id>
-    if (/^\/e\/[a-z0-9]+\/?$/i.test(location.pathname) &&
-        (supjavContext() || /voe\.sx|VOE/i.test([document.referrer, title].join(" ")))) {
-      return true;
-    }
-
-    return false;
+    return (!!document.referrer && relevantHost(hostOf(document.referrer))) ||
+      (/\bVOE\b/i.test(title) && /Content Delivery Network|Video Cloud|观看/i.test(title));
   };
 
   const relevantContext = () =>
     relevantHost(location.hostname.replace(/^www\./, "")) ||
-    relevantHost(hostOf(document.referrer)) ||
-    supjavContext() ||
+    ((window.top !== window.self || /^about:blank(?:[#?].*)?$/i.test(location.href)) &&
+      !!document.referrer && relevantHost(hostOf(document.referrer))) ||
     voePlayerContext();
 
   const topLevel = () => {
@@ -258,7 +236,6 @@
       if (!nativeOpen || nativeOpen.__supjavWrappedOpen) return nativeOpen;
       const wrapped = function (url, target, ...args) {
         if (blockedDirectPopup(url, target)) {
-          armPopupGuard();
           return makeFakeWindow();
         }
         return nativeOpen.call(this, url, target, ...args);
@@ -285,29 +262,6 @@
     if (pageWindow.Window && pageWindow.Window.prototype) patchOpen(pageWindow.Window.prototype);
   };
 
-  const armPopupGuard = () => {
-    try {
-      if (typeof GM_setValue === "function") GM_setValue(popupGuardKey, Date.now() + popupGuardMs);
-    } catch {
-      // Storage may be unavailable in some frames.
-    }
-  };
-
-  const popupGuardActive = () => {
-    try {
-      return Number(typeof GM_getValue === "function" ? GM_getValue(popupGuardKey, 0) : 0) > Date.now();
-    } catch {
-      return false;
-    }
-  };
-
-  const installPopupGuard = () => {
-    armPopupGuard();
-    for (const type of ["pointerdown", "mousedown", "click", "touchstart", "keydown"]) {
-      document.addEventListener(type, armPopupGuard, true);
-    }
-  };
-
   const blockedNavigation = (url) => {
     if (!url) return relevantContext();
     if (noopAction(url)) return false;
@@ -317,7 +271,10 @@
   };
 
   const closeBlockedPopup = () => {
-    if (!blocked(location.href) && !(topLevel() && (relevantContext() || popupGuardActive()) && !allowedPopup(location.href))) return false;
+    // Never close standalone tabs or infer ownership from another tab's activity.
+    if (!topLevel() || !window.opener || !document.referrer ||
+        !relevantHost(hostOf(document.referrer)) ||
+        !blockedDomains.some((domain) => hostMatches(location.hostname, domain))) return false;
     try {
       window.close();
     } catch {
@@ -397,7 +354,8 @@
       }
     };
 
-    [window, self, globalThis, parent, top].forEach(patchOpen);
+    // A supported iframe must not alter its (possibly unrelated) embedding page.
+    patchOpen(window);
 
     try {
       const nativePrototypeOpen = Window.prototype.open;
@@ -479,7 +437,7 @@
   function pagePatch(blockedDomains, allowedDomains, playerDomains) {
     if (window.__supjavPopupBlocker) return;
     window.__supjavPopupBlocker = true;
-    window.__supjavPopupBlockerVersion = "1.2.0";
+    window.__supjavPopupBlockerVersion = "1.2.1";
 
     const hostMatches = (host, domain) => host === domain || host.endsWith("." + domain);
     const hostOf = (url) => {
@@ -495,37 +453,20 @@
       "voeunbl0ck.com"
     ];
     const relevantHost = (host) =>
-      [...allowedDomains, ...blockedDomains, ...playerDomains].some((domain) => hostMatches(host, domain));
-    const supjavContext = () => {
-      const text = [location.href, document.referrer].filter(Boolean).join(" ");
-      try {
-        return /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(text) ||
-          /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(decodeURIComponent(text));
-      } catch {
-        return /(?:^|[/?#&@])(?:www\.)?supjav\.com\b/i.test(text);
-      }
-    };
+      [...allowedDomains, ...playerDomains].some((domain) => hostMatches(host, domain));
     const voePlayerContext = () => {
       const host = location.hostname.replace(/^www\./, "");
       if (voeStaticDomains.some((domain) => hostMatches(host, domain))) return true;
-
-      const referrerHost = hostOf(document.referrer);
-      if (voeStaticDomains.some((domain) => hostMatches(referrerHost, domain))) return true;
+      if (!/^\/e\/[a-z0-9]+\/?$/i.test(location.pathname)) return false;
 
       const title = document.title || "";
-      if (/\bVOE\b/i.test(title) && /Content Delivery Network|Video Cloud|观看/i.test(title)) return true;
-
-      if (/^\/e\/[a-z0-9]+\/?$/i.test(location.pathname) &&
-          (supjavContext() || /voe\.sx|VOE/i.test([document.referrer, title].join(" ")))) {
-        return true;
-      }
-
-      return false;
+      return (!!document.referrer && relevantHost(hostOf(document.referrer))) ||
+        (/\bVOE\b/i.test(title) && /Content Delivery Network|Video Cloud|观看/i.test(title));
     };
     const relevantContext = () =>
       relevantHost(location.hostname.replace(/^www\./, "")) ||
-      relevantHost(hostOf(document.referrer)) ||
-      supjavContext() ||
+      ((window.top !== window.self || /^about:blank(?:[#?].*)?$/i.test(location.href)) &&
+        !!document.referrer && relevantHost(hostOf(document.referrer))) ||
       voePlayerContext();
     const allowed = (url) => {
       const host = hostOf(url);
@@ -1886,14 +1827,14 @@
 
   const start = () => {
     if (ignoredContext()) return;
-    const relevant = relevantContext();
-    if (relevant) {
-      installPopupGuard();
-      installDirectOpenGuard();
-    }
-    injectBlankTabPatch();
     if (closeBlockedPopup()) return;
-    if (!relevant) return;
+    if (!relevantContext()) {
+      // Rotating VOE mirrors may expose their identifying title only after load.
+      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
+      return;
+    }
+    installDirectOpenGuard();
+    injectBlankTabPatch();
     injectPagePatch();
     addStyle();
     cleanNode(document.documentElement);
