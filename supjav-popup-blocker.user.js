@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Supjav popup blocker
 // @namespace    local.supjav-popup-blocker
-// @version      1.2.1
+// @version      1.2.2
 // @description  Block Supjav popups and auto-load the real player iframe.
 // @match        *://supjav.com/*
 // @match        *://*.supjav.com/*
@@ -85,7 +85,20 @@
     "anthemoutbackwrought.com",
     "chaliceguzzlerlandlord.com",
     "reedunpack.com",
-    "bareleggedhelmhim.com"
+    "bareleggedhelmhim.com",
+    // VOE in-page push / Connatix ad networks seen inside the player frame
+    "darnobedienceupscale.com",
+    "dreamlikefostergala.com",
+    "arrogancedanderuntruth.com",
+    "contraltoflubmedical.com",
+    "coosync.com",
+    "pncloudfl.com",
+    "connatix.com",
+    "cd.connatix.com",
+    "cds.connatix.com",
+    "capi.connatix.com",
+    "cks.connatix.com",
+    "static.ads-twitter.com"
   ];
 
   const allowedDomains = [
@@ -131,6 +144,30 @@
     "iframe[src]",
     "a[href]"
   ];
+
+  // VOE (and other mirrors) drop "in-page push"/interstitial cards as a fixed
+  // overlay div pinned to the top-right with the maximum z-index, straight under
+  // <html>. The ad host rotates, so detect the shape instead of the domain.
+  const adOverlayNode = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.id === "supjav-export-panel") return false;
+    if (!/^(?:DIV|IFRAME|SECTION|ASIDE)$/i.test(el.tagName)) return false;
+
+    const style = String((el.getAttribute && el.getAttribute("style")) || "");
+    if (!/position\s*:\s*fixed/i.test(style)) return false;
+    if (!/z-index\s*:\s*\d{5,}/i.test(style)) return false;
+
+    return el.tagName === "IFRAME" || !!(el.querySelector && el.querySelector("iframe"));
+  };
+
+  const removeAdOverlays = () => {
+    const roots = [document.documentElement, document.body].filter(Boolean);
+    for (const root of roots) {
+      for (const el of [...(root.children || [])]) {
+        if (adOverlayNode(el)) el.remove();
+      }
+    }
+  };
 
   const hostMatches = (host, domain) => host === domain || host.endsWith("." + domain);
 
@@ -437,7 +474,7 @@
   function pagePatch(blockedDomains, allowedDomains, playerDomains) {
     if (window.__supjavPopupBlocker) return;
     window.__supjavPopupBlocker = true;
-    window.__supjavPopupBlockerVersion = "1.2.1";
+    window.__supjavPopupBlockerVersion = "1.2.2";
 
     const hostMatches = (host, domain) => host === domain || host.endsWith("." + domain);
     const hostOf = (url) => {
@@ -1054,7 +1091,27 @@
         "iframe[src*='doubleclick']",
         "iframe[src*='googlesyndication']"
       ].join(",")).forEach((el) => el.remove());
+      removeAdOverlays();
       dismissResumePrompt();
+    };
+    const isAdOverlay = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.id === "supjav-export-panel") return false;
+      if (!/^(?:DIV|IFRAME|SECTION|ASIDE)$/i.test(el.tagName)) return false;
+
+      const style = String((el.getAttribute && el.getAttribute("style")) || "");
+      if (!/position\s*:\s*fixed/i.test(style)) return false;
+      if (!/z-index\s*:\s*\d{5,}/i.test(style)) return false;
+
+      return el.tagName === "IFRAME" || !!(el.querySelector && el.querySelector("iframe"));
+    };
+    const removeAdOverlays = () => {
+      for (const root of [document.documentElement, document.body]) {
+        if (!root || !root.children) continue;
+        for (const el of [...root.children]) {
+          if (isAdOverlay(el)) el.remove();
+        }
+      }
     };
     const streamtapeHost = (host) =>
       hostMatches(host, "streamtape.com") ||
@@ -1481,6 +1538,15 @@
   const cleanNode = (node) => {
     if (!node || node.nodeType !== 1) return;
 
+    if (adOverlayNode(node)) {
+      node.remove();
+      return;
+    }
+    if (node.parentElement && adOverlayNode(node.parentElement)) {
+      node.parentElement.remove();
+      return;
+    }
+
     const nodes = node.matches && node.matches(adSelectors.join(","))
       ? [node]
       : [];
@@ -1837,6 +1903,7 @@
     injectBlankTabPatch();
     injectPagePatch();
     addStyle();
+    removeAdOverlays();
     cleanNode(document.documentElement);
     restoreLazyImages(document.documentElement);
     installExportStateReceiver();

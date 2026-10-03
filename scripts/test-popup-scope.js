@@ -6,8 +6,8 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../supjav-popup-blocker.user.js"), "utf8");
 
-function simulate(url, { referrer = "", frame = false, opener = false, title = "Ordinary page", loading = false } = {}) {
-  const result = { scripts: 0, closes: 0, redirects: [], storageReads: 0, storageWrites: 0 };
+function simulate(url, { referrer = "", frame = false, opener = false, title = "Ordinary page", loading = false, pageOverlay = false } = {}) {
+  const result = { scripts: 0, closes: 0, redirects: [], storageReads: 0, storageWrites: 0, overlayRemoved: false };
   const listeners = new Map();
   const nativeOpen = () => "native-window";
   const ancestor = { open: nativeOpen, postMessage() {} };
@@ -23,6 +23,8 @@ function simulate(url, { referrer = "", frame = false, opener = false, title = "
       this.dataset = {};
       this.style = {};
       this.textContent = "";
+      this.children = [];
+      this.parentElement = null;
     }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
@@ -30,14 +32,35 @@ function simulate(url, { referrer = "", frame = false, opener = false, title = "
     removeAttribute(name) { this.attributes.delete(name); }
     matches(selector) { return this.tagName === "A" && this.hasAttribute("href") && selector.includes("a[href]"); }
     querySelectorAll(selector) { return this.tagName === "HTML" && selector.includes("a[href]") ? links : []; }
+    querySelector(selector) {
+      if (!selector || selector.includes(",")) return null;
+      for (const child of this.children) {
+        if (child.tagName === selector.toUpperCase()) return child;
+        const nested = child.querySelector && child.querySelector(selector);
+        if (nested) return nested;
+      }
+      return null;
+    }
     appendChild(node) {
+      if (node.parentElement) node.parentElement.removeChild(node);
+      node.parentElement = this;
+      this.children.push(node);
       if (node.tagName === "SCRIPT") {
         result.scripts++;
         vm.runInContext(node.textContent, context);
       }
       return node;
     }
-    remove() {}
+    removeChild(node) {
+      const index = this.children.indexOf(node);
+      if (index >= 0) this.children.splice(index, 1);
+      node.parentElement = null;
+      return node;
+    }
+    remove() {
+      if (this.parentElement) this.parentElement.removeChild(this);
+      if (this.dataset && this.dataset.supjavTestOverlay) result.overlayRemoved = true;
+    }
   }
   class HTMLAnchorElement extends Element {
     constructor(href, target = "") {
@@ -91,6 +114,13 @@ function simulate(url, { referrer = "", frame = false, opener = false, title = "
       }
     }
   };
+  if (pageOverlay) {
+    const overlay = new Element("DIV");
+    overlay.dataset.supjavTestOverlay = "1";
+    overlay.setAttribute("style", "position: fixed; right: 0px; top: 0px; z-index: 2147483647 !important;");
+    overlay.appendChild(new Element("IFRAME"));
+    sandbox.document.documentElement.appendChild(overlay);
+  }
   sandbox.window = sandbox.self = sandbox;
   sandbox.top = sandbox.parent = frame ? ancestor : sandbox;
   context = vm.createContext(sandbox);
@@ -189,4 +219,19 @@ assert.equal(adPopup.result.closes, 1);
 assert.deepEqual(adPopup.result.redirects, ["about:blank#supjav-blocked"]);
 assert.equal(adPopup.result.scripts, 0);
 assertUnaffected("https://mnaspm.com/ad", { referrer: "https://supjav.com/video" });
+// VOE in-page push ad cards (fixed overlay with max z-index and an iframe) must be removed.
+const overlayState = simulate("https://mirror.example/e/abc", {
+  title: "VOE - Video Cloud",
+  frame: true,
+  referrer: "https://supjav.com/video",
+  pageOverlay: true
+});
+assertProtected(overlayState);
+assert.equal(overlayState.result.overlayRemoved, true, "in-page push overlay must be removed");
+assert.equal(
+  overlayState.sandbox.document.documentElement.children.some(el => el.dataset.supjavTestOverlay === "1"),
+  false,
+  "in-page push overlay must no longer be attached"
+);
+
 console.log("Popup scope regression checks passed.");
